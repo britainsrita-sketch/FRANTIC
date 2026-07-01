@@ -1,106 +1,68 @@
 import os
-import random
-import string
-import threading
-from http.server import BaseHTTPRequestHandler, HTTPServer
+import logging
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+import pyshorteners
+
+# Enable logging to easily monitor your background worker in Render dashboard
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
+)
+logger = logging.getLogger(__name__)
 
 # --- CONFIGURATION ---
-# Replace with your actual bot token or set it as an environment variable
 BOT_TOKEN = os.getenv("BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
-# Render provides a PORT environment variable automatically. Default to 8080 locally.
-PORT = int(os.getenv("PORT", 8080))
-# Your deployed app's base URL (e.g., "https://your-app-name.onrender.com")
-BASE_URL = os.getenv("BASE_URL", f"http://localhost:{PORT}")
-
-# Global in-memory database to store urls: { short_token: long_url }
-url_database = {}
-
-# --- LINK SHORTENING LOGIC ---
-def generate_short_token(length=6):
-    """Generates a random alphanumeric string."""
-    characters = string.ascii_letters + string.digits
-    return ''.join(random.choice(characters) for _ in range(length))
 
 # --- TELEGRAM BOT HANDLERS ---
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Sends a welcoming message."""
     await update.message.reply_text(
-        "👋 Welcome to the Link Shortener Bot!\n\n"
-        "Simply send me any long URL (starting with http:// or https://), "
-        "and I will create a short redirect link for you instantly."
+        "👋 Welcome to the Background Link Shortener Bot!\n\n"
+        "Send me any long URL (starting with http:// or https://), "
+        "and I will instantly generate a shortened link for you using free APIs."
     )
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Processes incoming text and shortens URLs."""
+    """Processes incoming text and shortens URLs using free providers."""
     user_text = update.message.text.strip()
 
-    # Basic validation for URL
+    # Basic link validation
     if not (user_text.startswith("http://") or user_text.startswith("https://")):
         await update.message.reply_text("❌ Please send a valid link starting with http:// or https://")
         return
 
-    # Generate a unique token
-    token = generate_short_token()
-    while token in url_database:
-        token = generate_short_token()
+    # Send a placeholder message while processing
+    status_message = await update.message.reply_text("⚡ Shortening your link...")
 
-    # Save to local in-memory DB
-    url_database[token] = user_text
+    try:
+        # Initialize the free shortener engine
+        s = pyshorteners.Shortener()
+        
+        # We use TinyURL API here because it is free, unlimited, and requires no API keys/software setup
+        short_url = s.tinyurl.short(user_text)
 
-    # Construct the final shortened link
-    short_link = f"{BASE_URL.rstrip('/')}/{token}"
+        # Update the status message with the shortened URL
+        await status_message.edit_text(
+            f"🔗 **Your Shortened Link:**\n{short_url}"
+        )
+        logger.info(f"Successfully shortened link for user.")
 
-    await update.message.reply_text(
-        f"🔗 **Your Shortened Link:**\n{short_link}"
-    )
-
-# --- REDIRECT WEB SERVER ---
-class RedirectHandler(BaseHTTPRequestHandler):
-    """Handles incoming HTTP requests and redirects short tokens to the long URL."""
-    def do_GET(self):
-        # Extract token from path (e.g., "/abc123" -> "abc123")
-        token = self.path.lstrip("/")
-
-        if token in url_database:
-            long_url = url_database[token]
-            # Send 302 Found redirect status code
-            self.send_response(302)
-            self.send_header("Location", long_url)
-            self.end_headers()
-        else:
-            # Token not found
-            self.send_response(404)
-            self.send_header("Content-type", "text/html")
-            self.end_headers()
-            self.wfile.write(b"<h1>404 Link Not Found</h1><p>The shortened link is invalid or has expired.</p>")
-
-    def log_message(self, format, *args):
-        # Override to suppress flood of HTTP server logs in your console
-        return
-
-def run_web_server():
-    """Starts the native HTTP redirect server."""
-    server = HTTPServer(("0.0.0.0", PORT), RedirectHandler)
-    print(f"🌍 Redirect server running on port {PORT}...")
-    server.serve_forever()
+    except Exception as e:
+        logger.error(f"Error while shortening URL: {e}")
+        await status_message.edit_text("❌ Failed to shorten the link. Please try again later.")
 
 # --- MAIN EXECUTION ---
 def main():
-    # 1. Start the HTTP Redirect Server in a background thread
-    web_thread = threading.Thread(target=run_web_server, daemon=True)
-    web_thread.start()
-
-    # 2. Initialize and start the Telegram Bot Application
-    print("🤖 Starting Telegram Bot...")
+    print("🤖 Starting Background Worker Telegram Bot...")
+    
+    # Initialize the polling app (Perfect for Background Workers)
     application = Application.builder().token(BOT_TOKEN).build()
 
     # Register handlers
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    # Run the bot polling
+    # Run the bot permanently using polling (No ports needed, will never time out)
     application.run_polling()
 
 if __name__ == "__main__":
